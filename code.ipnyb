@@ -1,0 +1,453 @@
+# Import necessary libraries
+import os
+import sys
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import Counter
+
+# Create organized directory structure
+output_dir = './output'
+model_dir = f'{output_dir}/model'
+data_dir = f'{output_dir}/data'
+eval_dir = f'{output_dir}/evaluation'
+viz_dir = f'{output_dir}/visualizations'
+
+for directory in [output_dir, model_dir, data_dir, eval_dir, viz_dir]:
+    os.makedirs(directory, exist_ok=True)
+
+print("Finished")
+
+  
+pip uninstall nilearn mlxtend bigframes -y
+pip install huggingface_hub[hf_xet]  # optional perlu disesuaikan
+
+!pip install transformers datasets evaluate scikit-learn --no-deps -q
+
+# Import library yang diperlukan untuk model XLM-RoBERTa
+print("Import library yang diperlukan...")
+# !pip install transformers datasets evaluate scikit-learn -q
+
+import torch
+print("CUDA Available:", torch.cuda.is_available())
+print("CUDA Device Name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU Only")
+
+from transformers import (
+    XLMRobertaTokenizer, 
+    XLMRobertaForSequenceClassification, 
+    TrainingArguments, 
+    Trainer,
+    EarlyStoppingCallback
+)
+from datasets import Dataset
+from sklearn.metrics import (
+    accuracy_score, 
+    precision_recall_fscore_support, 
+    confusion_matrix, 
+    classification_report,
+    f1_score
+)
+import json
+from sklearn.utils import shuffle
+
+print("finished")
+
+pip show torch transformers
+
+# 1. Data Loading and Exploration
+
+# Load dataset
+print("Loading dataset...")
+dataset_path = '/kaggle/input/laporgub-dataset/new_dataset.csv'
+
+# Check file availability
+if not os.path.exists(dataset_path):
+    print(f"File tidak ditemukan di {dataset_path}")
+    print("Silakan upload dataset ke Kaggle dan sesuaikan path")
+else:
+    print(f"Dataset ditemukan di {dataset_path}")
+
+# Load dataset with proper delimiter handling
+try:
+    df = pd.read_csv(dataset_path, delimiter=';')
+except Exception as e:
+    print(f"Error saat membaca file CSV: {e}")
+    print("Mencoba dengan delimiter lain...")
+    try:
+        df = pd.read_csv(dataset_path)  # Try without specific delimiter
+        print("File berhasil dimuat dengan delimiter default")
+    except Exception as e2:
+        print(f"Masih error: {e2}")
+
+print("finished")
+
+
+# Explore data
+print("Explorasi data awal:")
+df.info()
+
+category_counts = df['category'].value_counts()
+print(category_counts)
+
+# 1.1 Drop kategori dengan performa buruk
+drop_categories = ['KATEGORI LAIN-LAIN', 'PEMBANGUNAN DAERAH', 'SABERPUNGLI']
+
+print(f"Menghapus data dengan kategori: {drop_categories}")
+initial_count = len(df)
+df = df[~df['category'].isin(drop_categories)]
+final_count = len(df)
+
+print(f"Jumlah data sebelum drop: {initial_count}")
+print(f"Jumlah data setelah drop: {final_count}")
+print(f"Jumlah data yang dihapus: {initial_count - final_count}")
+
+# Tampilkan distribusi baru
+print("Distribusi kategori setelah drop:")
+print(df['category'].value_counts())
+
+# Text length analysis
+df['text_length'] = df['content'].astype(str).apply(len)
+print(f"Rata-rata panjang teks: {df['text_length'].mean()}")
+print(f"Panjang teks maksimum: {df['text_length'].max()}")
+print(f"Panjang teks minimum: {df['text_length'].min()}")
+
+# Check missing values
+df.isnull().sum()
+
+# Check duplicate
+df.duplicated(subset=['content']).sum()
+
+# Check data
+df.sample(5)
+
+# 2. Data Preprocessing
+
+!pip install emoji beautifulsoup4
+
+import re
+import html
+import pandas as pd
+from bs4 import BeautifulSoup
+import emoji
+
+def clean_text(text):
+    if pd.isnull(text):
+        return ""
+    
+    # Convert HTML entities to normal characters
+    text = html.unescape(text)
+
+    # Hanya gunakan BeautifulSoup jika tampak seperti HTML (mengandung tag)
+    if bool(re.search(r'<[^>]+>', text)):
+        # Remove HTML tags
+        text = BeautifulSoup(text, "html.parser").get_text()
+    
+    # Convert to lowercase
+    text = text.lower()
+    
+    # Remove emojis
+    text = emoji.replace_emoji(text, replace='')  # requires emoji>=2.0
+    
+    # Normalize repeated characters (e.g. coooool → cool)
+    text = re.sub(r'(.)\1{2,}', r'\1', text)
+    
+    # Remove extra spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+# Hapus data kosong/null
+df = df.dropna(subset=['content'])  # Ganti 'text_column' dengan kolom teks Anda
+df.info()
+
+# Hapus duplikat
+df = df.drop_duplicates(subset=['content'])
+df.info()
+
+# Bersihkan teks
+df['cleaned_text'] = df['content'].apply(clean_text)
+df.info()
+
+# Hapus duplikat clean text
+df = df.drop_duplicates(subset=['cleaned_text'])
+df.info()
+
+# 3. Split Data
+
+# Split dataset with stratified sampling
+from sklearn.model_selection import train_test_split
+
+print("Melakukan split dataset...")
+# Pisahkan data test dulu (10%)
+train_val_df, test_df = train_test_split(
+    df,
+    test_size=0.1,
+    random_state=42,
+    stratify=df['category']
+)
+# Dari sisa 90% (train_val_df), bagi untuk val 20% dan train 80%
+val_df, train_df = train_test_split(
+    train_val_df,
+    test_size=0.8,
+    random_state=42,
+    stratify=train_val_df['category']
+)
+# Simpan file hasil split
+data_dir = '.'  # ganti path sesuai keinginan
+train_df.to_csv(f'{data_dir}/train_data.csv', index=False)
+val_df.to_csv(f'{data_dir}/val_data.csv', index=False)
+test_df.to_csv(f'{data_dir}/test_data.csv', index=False)
+print(f"Jumlah sampel train: {len(train_df)} ({len(train_df)/len(df)*100:.2f}%)")
+print(f"Jumlah sampel val: {len(val_df)} ({len(val_df)/len(df)*100:.2f}%)")
+print(f"Jumlah sampel test: {len(test_df)} ({len(test_df)/len(df)*100:.2f}%)")
+
+# 2. Persiapan Dataset
+print("Mempersiapkan dataset...")
+# Load dataset yang sudah di-split
+train_df = pd.read_csv(f'{data_dir}/train_data.csv')
+val_df = pd.read_csv(f'{data_dir}/val_data.csv')
+test_df = pd.read_csv(f'{data_dir}/test_data.csv')
+
+# Tampilkan informasi distribusi kategori
+print("Distribusi kategori pada data training:")
+train_category_counts = train_df['category'].value_counts()
+print(train_category_counts)
+
+# 3. Fungsi untuk mengubah DataFrame ke Dataset Hugging Face
+def df_to_dataset(dataframe):
+    return Dataset.from_pandas(dataframe)
+
+# Mengonversi DataFrame ke Dataset Hugging Face
+train_dataset = df_to_dataset(train_df)
+val_dataset = df_to_dataset(val_df)
+test_dataset = df_to_dataset(test_df)
+
+# 4. Tokenisasi dengan XLM-RoBERTa
+print("Memuat tokenizer XLM-RoBERTa...")
+tokenizer = XLMRobertaTokenizer.from_pretrained('xlm-roberta-base')
+
+# Fungsi untuk tokenisasi teks
+def tokenize_function(examples):
+    return tokenizer(
+        examples['cleaned_text'], 
+        padding='max_length', 
+        truncation=True, 
+        max_length=256  # Sesuaikan dengan kebutuhan dan memory yang tersedia
+    )
+
+print("Tokenisasi dataset...")
+train_tokenized = train_dataset.map(tokenize_function, batched=True)
+val_tokenized = val_dataset.map(tokenize_function, batched=True)
+test_tokenized = test_dataset.map(tokenize_function, batched=True)
+
+print("finished")
+
+# 5. Persiapan Label
+print("Mempersiapkan label...")
+# Membuat mapping dari kategori ke label indeks
+categories = sorted(list(train_df['category'].unique()))
+label2id = {label: idx for idx, label in enumerate(categories)}
+id2label = {idx: label for label, idx in label2id.items()}
+
+# Simpan mapping kategori untuk referensi
+with open(f'{model_dir}/category_mapping.json', 'w') as f:
+    json.dump({'label2id': label2id, 'id2label': id2label}, f)
+
+# Fungsi untuk mengkonversi kategori ke label indeks
+def convert_to_label_ids(examples):
+    return {'labels': [label2id[label] for label in examples['category']]}
+
+# Konversi kategori ke label indeks
+train_tokenized = train_tokenized.map(convert_to_label_ids, batched=True)
+val_tokenized = val_tokenized.map(convert_to_label_ids, batched=True)
+test_tokenized = test_tokenized.map(convert_to_label_ids, batched=True)
+
+
+# 6. Definisi Fungsi Evaluasi
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=1)
+    
+    # Metrik agregat
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels, predictions, average='weighted', zero_division=0
+    )
+    accuracy = accuracy_score(labels, predictions)
+    
+    # Metrik makro (tidak dipengaruhi oleh ketidakseimbangan kelas)
+    macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(
+        labels, predictions, average='macro', zero_division=0
+    )
+    
+    # Metrik per kelas
+    per_class_precision, per_class_recall, per_class_f1, per_class_support = precision_recall_fscore_support(
+        labels, predictions, average=None, zero_division=0
+    )
+    
+    # Kemas menjadi dictionary untuk setiap kelas
+    per_class_metrics = {}
+    for i, category in enumerate(categories):
+        per_class_metrics[f"f1_{category}"] = per_class_f1[i]
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'macro_precision': macro_precision,
+        'macro_recall': macro_recall,
+        'macro_f1': macro_f1,
+        **per_class_metrics
+    }
+
+
+# 7. Persiapan Training Arguments
+print("Mempersiapkan argumen training...")
+training_args = TrainingArguments(
+    output_dir=f'{model_dir}/xlm-roberta-unbalanced/checkpoints',
+    eval_strategy='epoch',
+    save_strategy='epoch',
+    learning_rate=2e-5,
+    per_device_train_batch_size=16,  # Sesuaikan dengan kapasitas GPU
+    per_device_eval_batch_size=32,
+    num_train_epochs=10,
+    weight_decay=0.01,
+    load_best_model_at_end=True,
+    metric_for_best_model='macro_f1',  # Gunakan macro F1 karena lebih sensitif terhadap kelas minoritas
+    save_total_limit=2,  # Simpan hanya 2 checkpoint terbaik untuk menghemat ruang
+    report_to='none',  # Nonaktifkan pelaporan ke wandb, tensorboard, dll
+    fp16=True if torch.cuda.is_available() else False,  # Mixed precision training jika GPU tersedia
+    seed=42
+)
+
+print("finished")
+
+
+# 8. Definisi Model XLM-RoBERTa untuk Klasifikasi
+print("Memuat model XLM-RoBERTa...")
+model = XLMRobertaForSequenceClassification.from_pretrained(
+    'xlm-roberta-base',
+    num_labels=len(categories),
+    id2label=id2label,
+    label2id=label2id
+)
+print("finished")
+
+# 9. Inisialisasi Trainer
+print("Inisialisasi Trainer...")
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_tokenized,
+    eval_dataset=val_tokenized,
+    compute_metrics=compute_metrics,
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
+)
+
+# 10. Latih Model
+print("Melatih model XLM-RoBERTa tanpa balancing...")
+trainer.train()
+
+print("finished training")
+
+# 11. Evaluasi Model
+print("Evaluasi model pada dataset validasi...")
+val_results = trainer.evaluate()
+print(f"Validation Results: {val_results}")
+
+print("Evaluasi model pada dataset test...")
+test_results = trainer.evaluate(test_tokenized)
+print(f"Test Results: {test_results}")
+
+# 12. Simpan Model Terlatih
+print("Menyimpan model terlatih...")
+trainer.save_model(f'{model_dir}/xlm-roberta-unbalanced/model')
+tokenizer.save_pretrained(f'{model_dir}/xlm-roberta-unbalanced/tokenizer')
+print(f"Model disimpan di {model_dir}/xlm-roberta-unbalanced/model")
+
+# 13. Evaluasi Detail dan Visualisasi
+print("Melakukan evaluasi detail dan visualisasi...")
+
+# Prediksi pada test set
+test_preds = trainer.predict(test_tokenized)
+test_pred_labels = np.argmax(test_preds.predictions, axis=1)
+test_true_labels = np.array(test_tokenized['labels'])
+
+# Konversi ID label ke nama kategori
+test_pred_categories = [id2label[id] for id in test_pred_labels]
+test_true_categories = [id2label[id] for id in test_true_labels]
+
+
+# 13.1 Confusion Matrix
+cm = confusion_matrix(test_true_categories, test_pred_categories, labels=categories)
+
+# Normalisasi confusion matrix untuk visualisasi lebih baik
+cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+# Plot confusion matrix
+plt.figure(figsize=(20, 16))
+sns.heatmap(cm_normalized, annot=True, fmt='.2f', xticklabels=categories, yticklabels=categories, cmap='Blues')
+plt.title('Confusion Matrix Normalized (Unbalanced Model)')
+plt.ylabel('True Label')
+plt.xlabel('Predicted Label')
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.savefig(f'{eval_dir}/unbalanced_confusion_matrix_normalized.png')
+plt.show()
+
+# Plot confusion matrix absolut
+plt.figure(figsize=(20, 16))
+sns.heatmap(cm, annot=True, fmt='d', xticklabels=categories, yticklabels=categories, cmap='Blues')
+plt.title('Confusion Matrix Absolute (Unbalanced Model)')
+plt.ylabel('True Label')
+plt.xlabel('Predicted Label')
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.savefig(f'{eval_dir}/unbalanced_confusion_matrix_absolute.png')
+plt.show()
+
+
+# 13.2 Classification Report
+cr = classification_report(test_true_categories, test_pred_categories, output_dict=True)
+cr_df = pd.DataFrame(cr).transpose()
+cr_df.to_csv(f'{eval_dir}/unbalanced_classification_report.csv')
+cr_df.info()
+
+cr_df.head()
+
+# 13.3 Visualisasi F1-Score per Kategori
+plt.figure(figsize=(16, 8))
+cr_df_filtered = cr_df.iloc[:-3]  # Mengabaikan baris rata-rata di akhir
+cr_df_filtered = cr_df_filtered.sort_values('f1-score', ascending=False)
+
+sns.barplot(x=cr_df_filtered.index, y='f1-score', data=cr_df_filtered)
+plt.title('F1-Score per Kategori (Model Tanpa Balancing)')
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.savefig(f'{eval_dir}/unbalanced_f1_score_per_category.png')
+plt.show()
+
+# 13.4 Korelasi antara Jumlah Sampel dan F1-Score
+category_counts = train_df['category'].value_counts().to_dict()
+f1_scores = {cat: cr[cat]['f1-score'] for cat in categories}
+
+correlation_data = pd.DataFrame({
+    'category': categories,
+    'sample_count': [category_counts.get(cat, 0) for cat in categories],
+    'f1_score': [f1_scores.get(cat, 0) for cat in categories]
+})
+
+plt.figure(figsize=(10, 6))
+sns.scatterplot(x='sample_count', y='f1_score', data=correlation_data)
+for i, row in correlation_data.iterrows():
+    plt.annotate(row['category'], (row['sample_count'], row['f1_score']), 
+                fontsize=8, alpha=0.7)
+plt.xscale('log')  # Log scale untuk sample count karena range yang lebar
+plt.title('Korelasi antara Jumlah Sampel dan F1-Score')
+plt.xlabel('Jumlah Sampel (log scale)')
+plt.ylabel('F1-Score')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(f'{eval_dir}/unbalanced_sample_count_vs_f1.png')
+plt.show()
